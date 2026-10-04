@@ -1,0 +1,18 @@
+[project]
+name = "tp-deskflight"
+version = "0.2.0"
+description = "tp - a start/stop/pause flight recorder for your workstation and lab. Tamper-evident proof-of-work capture, routed into Rev Vision."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+authors = [{ name = "Revanth Kumar" }]
+
+[project.scripts]
+tp = "tp.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["tp"]
