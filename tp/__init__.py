@@ -7,4 +7,4 @@ seals them into a tamper-evident hash chain, and pushes the record to your
 Rev Vision web app where you route it to Writeups, Projects or the Tech feed.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

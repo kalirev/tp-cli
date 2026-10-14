@@ -35,9 +35,21 @@ There are two halves, and they live in two different places.
 - **The boundary is crossed once, by you**, with `tp push`. Before that moment
   the data is only on disk under `~/.tp/`.
 
-A **session** is one recording: from `tp start` to `tp stop`. While it's active,
-every terminal that has the hook loaded feeds commands into it. You annotate it
-with reasoning as you go. On stop it's redacted, hash-chained, and sealed.
+**Since v0.3, recording never stops.** Every terminal with the hook loaded
+journals each command — with its cwd, exit code, timing and, through `tp pty`,
+its output — to `~/.tp/journal/`, redacted and hash-chained as it's written.
+
+A **session** is a time window cut from that journal: from `tp start` to
+`tp stop`, minus paused stretches, plus any earlier stretch you pull in with
+`--from` / `tp extend`. You annotate it with reasoning as you go. On stop the
+commands in the window are merged with your notes in timestamp order,
+hash-chained, and sealed. Each command keeps an `origin`:
+
+| origin | where it came from | fidelity |
+|---|---|---|
+| `live` | journaled while the session was recording | full: output, cwd, exit, chained when written |
+| `journal` | journaled before `tp start`, pulled in by `--from` / `extend` | same as live |
+| `history` | fish history, for time the journal didn't cover | command text + time only, not chained until import |
 
 ---
 
@@ -56,9 +68,39 @@ $ tp start "prooflayer sidecar: mTLS between gateway and recorder" -p ProofLayer
 The id (`20261002-211021-47d5`) is `YYYYMMDD-HHMMSS-<rand>`. It's the handle for
 every later command.
 
+Backfill at start with `--from WHEN` (alias `--since`). `WHEN` is a clock time
+(`21:40`, today; yesterday if that's still ahead), a date-time
+(`'2026-10-12 21:40'`), or a duration (`1h`, `45m`, `1h30m`). `--no-history`
+skips the fish-history fallback. No title on a terminal? `tp start` asks for one.
+```
+$ tp start "REV external SSD mount" -p localAI-Zephyrus --from 21:40
+● recording  20261012-054356-0d57
+  REV external SSD mount   project=localAI-Zephyrus
+  ↶ backfilled  21:40:00 → 22:43:56   41 from journal (with output)
+```
+
+### `tp extend --from WHEN`
+Widen the **active** session further back, any time before `tp stop`. Clock
+times are read relative to the session's start day, so this also works on a
+session you reopened days later. Running it again replaces the earlier backfill.
+
+### `tp reopen <id> [--force]`
+Unseal a stopped session so you can `extend` it or keep recording into it. The
+old digest is kept in `meta.json` (`prior_digests`) and the old timeline in
+`events.sealed-N.json`, so a re-seal is visible, never silent. Refused for a
+session you already pushed unless `--force` (the server record then shows the
+earlier digest too).
+```
+$ tp reopen 20261012-054356-0d57
+$ tp extend --from 21:40
+$ tp stop --to writeups
+```
+
 ### `tp pause` / `tp resume`
-Stop and restart **both** the clock and capture. Commands you run while paused
-are not recorded, and paused time is not counted toward `active_seconds`.
+Stop and restart the session's clock. Commands run while paused are still
+journaled, but they're outside the session's window, so they aren't in it, and
+paused time doesn't count toward `active_seconds`. (To stop capture entirely,
+use `tp off`.)
 ```
 $ tp pause
 ∥ paused   12m03s on the clock
@@ -86,34 +128,100 @@ $ tp open https://localhost:8443/v1/events recorder ingest, now mTLS-gated
 ```
 
 ### `tp status`
-Show the active session at a glance.
+Show whether this terminal is capturing, and the active session at a glance.
 ```
 $ tp status
+journal on · this terminal: commands + output
 ● recording   20261002-211021-47d5
   prooflayer sidecar: mTLS between gateway and recorder   project=ProofLayer
-  5 commands captured   8m12s active
+  18 commands (17 with output)   8m12s live on the clock
+  5 live · 13 backfilled from journal
+  window starts 2026-10-02 20:41:00
 ```
 
-### `tp stop [--to BUCKET] [--push]`
-Finish the session: close the clock, snapshot code+ports, redact, hash-chain,
-compute the digest. `--to` sets the bucket; `--push` also sends it immediately.
+### `tp off` / `tp on` `[--window]`
+Stop / restart all capture (journal included) — everywhere, or with `--window`
+only in this terminal. Nothing typed or printed while off is written anywhere.
+
+### `tp journal [--since WHEN] [-n N]` · `tp journal verify|prune|clear`
+Show recent journal records (with the first line of output), check the
+journal's chain, apply retention now, or delete it (`clear --yes`; sealed
+sessions keep their own copies).
+
+### `tp archive <id>... | --pushed | --older-than WHEN [--dry-run]` · `tp archive --where`
+Move sealed sessions out of the working set into the archive path —
+`~/.tp/archive` unless you set `tp config archive_path PATH` (e.g. your
+external SSD). The session must be stopped and must pass `tp verify`; it is
+copied, the copy is verified and compared byte-for-byte, and only then is the
+original removed. `index.jsonl` in the archive lists what's there. Archived
+sessions still work with `show`, `verify`, `push`, `route`; `tp ls --archived`
+lists them. A path under `/mnt/…`, `/media/…` or `/run/media/…` is refused
+when that drive isn't mounted, so nothing lands on the empty mountpoint.
+```
+$ tp config archive_path /mnt/rev-ssd/tp-archive
+$ tp archive --pushed --older-than 30d
+⇣ archived  20261002-211021-47d5  → /mnt/rev-ssd/tp-archive/20261002-211021-47d5
+```
+
+### `tp unarchive <id>`
+Move an archived session back into the working set (needed before `reopen`).
+
+### `tp dispose <id> [--journal] [--remote] [--yes]`
+Delete a recording on purpose — from the working set or the archive, including
+the running one. You type the session id to confirm (`--yes` for scripts; with
+no terminal and no `--yes` it refuses). One line goes to `~/.tp/disposed.jsonl`:
+id, title, digest, when — never content.
+- `--journal` also disposes the journal records inside the session's window,
+  so its commands and output are gone from the rolling journal too.
+- `--remote` deletes it from Rev Vision first (DELETE on the ingest route). If
+  that fails, nothing is deleted locally, so you can retry. Without it you're
+  warned when a pushed copy will remain.
+
+### `tp dispose --journal-from WHEN [--until WHEN] [--yes]`
+Wipe a stretch of the journal with no session involved — for the moment you
+printed a secret. Disposed journal records become tombstones that keep only
+their sequence number, time and hashes: the chain still links end to end, and
+`tp journal verify` reports how many were disposed. Deleting is possible;
+hiding that you deleted is not.
+
+Files are unlinked, not shredded (on an SSD, overwriting doesn't reliably
+erase anyway); use full-disk encryption for that guarantee.
+
+### `tp doctor`
+Checks the `tp` executable, whether this terminal is inside `tp pty`, which rc
+files load the hook, the journal chain, and the fish-history fallback.
+
+### `tp pty [shell ...]`
+The output-capturing wrapper. The hook starts it for you; you'd only run it by
+hand to test (`tp pty bash --norc`).
+
+### `tp stop [--to BUCKET] [--push] [--with-output]`
+Finish the session: close the clock, snapshot code+ports, merge the window,
+hash-chain, compute the digest. `--to` sets the bucket; `--push` also sends it.
+Active time for a backfilled stretch is **estimated** from the commands in it
+(each counts until the next, at most `idle_gap_seconds` after it ends) and
+reported separately.
 ```
 $ tp stop --to writeups
 ■ stopped   20261002-211021-47d5
   8 events   8m12s active
+  8 live
   digest 1dca8249c0d16b85…   (tp verify 20261002-211021-47d5)
   routed to writeups; push with:  tp push 20261002-211021-47d5
 ```
 
-### `tp ls [-n N]`
+### `tp ls [-n N] [--archived]`
 List recent sessions (newest first). `●` active, `∥` paused, `↑` pushed.
+`--archived` lists the archive instead.
 ```
 $ tp ls
   20261002-211021-47d5    8m12s  writeups   ↑ prooflayer sidecar: mTLS between gateway and recorder
 ```
 
-### `tp show <id> [-n N]`
-Print a session's sealed timeline. `ok` / `eN` is the command's exit code.
+### `tp show <id> [-n N] [--output] [--lines N]`
+Print a session's sealed timeline. `ok` / `eN` is the command's exit code, `?`
+unknown (history imports); `↶` marks commands backfilled from the journal and
+`h` ones from fish history. `--output` prints what each command printed.
 ```
 $ tp show 20261002-211021-47d5
 prooflayer sidecar: mTLS between gateway and recorder   20261002-211021-47d5
@@ -132,7 +240,10 @@ prooflayer sidecar: mTLS between gateway and recorder   20261002-211021-47d5
 
 ### `tp verify <id>`
 Recompute the hash chain from the sealed file **as stored** and compare it to the
-digest. This is the tamper-evidence check.
+digest. This is the tamper-evidence check. It also checks each command's output
+against its sealed `output_sha256`, cross-checks backfilled commands against
+the journal records they cite (while retention still keeps them), and says
+plainly how many events came from fish history.
 ```
 $ tp verify 20261002-211021-47d5
 ✓ verified  chain intact  (8 events)
@@ -148,9 +259,12 @@ routed  20261002-211021-47d5 → projects
 ↑ pushed  20261002-211021-47d5 → rev-engineering  /projects/20261002-211021-47d5
 ```
 
-### `tp push <id> [--to BUCKET]`
+### `tp push <id> [--to BUCKET] [--with-output]`
 Send a finished session to rev-engineering over HTTPS. Idempotent — re-pushing
 the same id updates the record (and its bucket) rather than duplicating it.
+**Command output stays on your machine** unless you pass `--with-output` (or
+set `push_output true`). Each event still carries its `output_sha256`, so the
+pushed chain verifies either way.
 ```
 $ tp push 20261002-211021-47d5 --to writeups
 ↑ pushed  20261002-211021-47d5 → rev-engineering  /writeups/20261002-211021-47d5
@@ -318,7 +432,15 @@ it needs. (I can build that renderer next.)
 | `capture_ports` | `true` | snapshot listening localhost services |
 | `capture_gitdiff` | `true` | snapshot git diffs for repos you touched |
 | `max_patch_bytes` | `200000` | cap a single repo's stored patch |
-| `redact_patterns` | `[]` | extra regexes to redact (your own secret shapes) |
+| `redact_patterns` | `[]` | extra regexes to redact (your own secret shapes) — a JSON list |
+| `journal` | `true` | always-on journal; `false` = v0.2 behaviour (only inside a session, commands only) |
+| `journal_days` | `7` | journal retention… |
+| `journal_max_mb` | `1024` | …or size cap, whichever comes first (never drops the active session's window) |
+| `pty` | `true` | hook wraps new interactive shells in `tp pty` for output capture |
+| `output_max_bytes` | `65536` | per command; the first and last halves are kept |
+| `push_output` | `false` | include output in pushes by default |
+| `idle_gap_seconds` | `300` | cap per command when estimating backfilled active time |
+| `archive_path` | `""` (= `~/.tp/archive`) | where `tp archive` moves sealed sessions |
 
 Override the whole vault location with `export TP_HOME=/path` (e.g. to keep it
 inside a repo you back up).
@@ -327,8 +449,8 @@ inside a repo you back up).
 
 ## 6. Redaction & security
 
-Before anything is written to the sealed timeline or pushed, command text runs
-through redaction. Built-in: `--password/--token/--secret/--api-key/...`,
+Before anything is written to disk — the journal included — command text and
+output run through redaction. Built-in: `--password/--token/--secret/--api-key/...`,
 `NAME_TOKEN=value`, bare `token=/secret=/password=/apikey=` (any case),
 `Bearer <...>`, AWS access keys (`AKIA…`), GitHub tokens (`ghp_…`), private-key
 headers. Add your own shapes:
@@ -340,9 +462,21 @@ Two more layers:
   recorded at all — use this for anything you don't want on disk.
 - **`tp pause`** before doing something you don't want captured.
 
-Capture is **command-level**, not a PTY transcript: it records what you ran and
-how it exited, never keystrokes or screen output. That keeps records small and
-safe to publish. Treat the DB as sensitive anyway — it describes your lab; don't
+**Output gets extra rules**, because it leaks secrets more often than commands
+do: `key: value` forms, whole PEM private-key blocks, OpenAI/Anthropic/Slack/
+Google/GitLab/Hugging Face/JWT token shapes, and a high-entropy check for any
+other random-looking string (mixed case + digits, 24+ chars; hex hashes, paths
+and UUID-style ids are kept). Full-screen programs are never recorded.
+
+Layers, strongest first:
+- **`tp off`** (or `tp off --window`) — nothing is captured at all.
+- **Space-prefix a command** — neither it nor its output is recorded.
+- **Output is local by default** — `tp push` leaves it behind unless
+  `--with-output`.
+- The journal is `0700`, files `0600`, and kept 7 days / 1 GB.
+
+Keystrokes are never recorded (only the final command line and what it
+printed). Treat the DB as sensitive anyway — it describes your lab; don't
 expose those tables through any public route.
 
 ---
@@ -403,21 +537,27 @@ first — that's the one piece that must exist before `tp push` has a home.
 
 | symptom | cause / fix |
 |---|---|
-| nothing captured | hook not loaded in that shell (`tp hook <shell>` in your rc), or no active session (`tp status`), or paused |
+| nothing captured | hook not loaded in that shell (`tp hook <shell>` in your rc), capture off (`tp on`), or the commands were outside the session window (`tp extend --from …`) — `tp doctor` |
+| commands but no output | that terminal isn't inside `tp pty`: no `tp` executable (run `install.sh`), `pty` off, or the terminal was opened before the upgrade — open a new one |
+| `tp start` says "already covers" | `--from` must be earlier than the session's start |
+| backfilled commands show `?` and no output | they came from fish history: the journal didn't cover that time |
 | a secret showed up in `tp show` | add a pattern to `redact_patterns`; re-run `tp stop` is not needed — finalize re-redacts on `show`/`verify` from source |
 | `tp verify` fails | the sealed `events.jsonl` was edited after stop — that's the point; the record is no longer trustworthy |
 | `push failed … 401` | client `token` ≠ server `TP_INGEST_TOKEN` |
 | `push failed … could not reach` | wrong `api_url`, route not deployed, or offline |
 | `push failed … 500 … TP_INGEST_TOKEN` | server env var not set |
-| hook feels slow | it shells out to `python3` once per command; `tp pause` during heavy scripted loops |
+| hook feels slow | it shells out to `python3` once per command (~80 ms); `tp off --window` during heavy scripted loops |
+| a terminal won't start | run `TP_NO_PTY=1 fish` (or `tp config pty off`) and report `tp doctor` |
 
 ---
 
-## 10. Not in v1 (candidates next)
+## 10. Not yet (candidates next)
+
+- Splitting commands typed inside `ssh` out of the `ssh` command's output.
+- Optional full raw transcript per window (today: per-command head + tail).
 
 - The UI renderer described in §4 (session → Writeup draft) + server-side
   `verified` badge.
-- `tp resume <id>` to reopen a stopped session across days.
 - Dedup of identical consecutive port snapshots.
 - Richer browser capture beyond `tp open` / localhost ports.
 - A `tp sync` to push every un-pushed session in one shot.

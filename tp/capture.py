@@ -45,6 +45,98 @@ def redact(text: str, extra_patterns: list[str] | None = None) -> str:
     return text
 
 
+# ---- terminal output ----------------------------------------------------------
+#
+# Output leaks secrets far more often than commands do (a `cat .env`, an
+# `aws configure list`, a token printed by a CLI on login). Output therefore
+# gets the command rules above PLUS:
+#   - "key: value" forms, not just key=value
+#   - whole PEM private-key blocks
+#   - well-known token prefixes (OpenAI/Anthropic, Slack, Google, GitLab, HF, JWT)
+#   - a high-entropy check for anything else that looks like a random secret.
+
+_OUTPUT_EXTRA = [
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S),
+     lambda m: REDACTED),
+    (re.compile(r"\b((?:password|passwd|secret|token|api[-_ ]?key|access[-_ ]?key|client[-_ ]?secret)"
+                r"[\"']?\s*[:=]\s*[\"']?)([^\s\"',;]{4,})", re.I),
+     lambda m: m.group(1) + REDACTED),
+    (re.compile(r"\b(?:sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{20,}|xox[abposr]-[A-Za-z0-9\-]{10,}"
+                r"|AIza[0-9A-Za-z_\-]{35}|glpat-[A-Za-z0-9_\-]{20,}|hf_[A-Za-z0-9]{30,})"),
+     lambda m: REDACTED),
+    (re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
+     lambda m: REDACTED),
+]
+
+# Candidate random tokens: no '/', '.' or ':' so paths, hostnames and versions
+# never match; mixed case + digits required so hex hashes and commit ids
+# (useful in a writeup, and not secrets) are kept.
+_TOKEN = re.compile(r"(?<![A-Za-z0-9+_\-])[A-Za-z0-9+_=\-]{24,}(?![A-Za-z0-9+_\-])")
+
+
+def _entropy(s: str) -> float:
+    from collections import Counter
+    from math import log2
+    n = len(s)
+    return -sum(c / n * log2(c / n) for c in Counter(s).values())
+
+
+def _looks_secret(tok: str) -> bool:
+    if not (any(c.islower() for c in tok) and any(c.isupper() for c in tok)
+            and any(c.isdigit() for c in tok)):
+        return False
+    return _entropy(tok) >= 4.2
+
+
+def redact_output(text: str, extra_patterns: list[str] | None = None) -> str:
+    if not text:
+        return text
+    for rx, repl in _OUTPUT_EXTRA:
+        text = rx.sub(repl, text)
+    text = redact(text, extra_patterns)
+    return _TOKEN.sub(lambda m: REDACTED if _looks_secret(m.group(0)) else m.group(0), text)
+
+
+# Escape sequences: CSI (colours, cursor moves), OSC (titles, hyperlinks,
+# kitty/iTerm integration), and the remaining two-byte ESC forms.
+_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ESC = re.compile(r"\x1b[PX^_][^\x1b]*\x1b\\|\x1b[@-Z\\-_]|\x1b[()][0-9A-Za-z]")
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+ALT_SCREEN = re.compile(rb"\x1b\[\?(?:1049|1047|47)h")
+
+
+def clean_terminal(raw: str) -> str:
+    """Turn a captured terminal byte stream into the text a person saw.
+
+    Strips escape sequences, applies carriage-return overwrites (progress bars
+    keep only their final state) and backspaces, and drops other controls.
+    """
+    s = _OSC.sub("", raw)
+    s = _CSI.sub("", s)
+    s = _ESC.sub("", s)
+    s = s.replace("\r\n", "\n")
+    lines = []
+    for line in s.split("\n"):
+        if "\r" in line:
+            # later segments overwrite earlier ones from column 0
+            buf: list[str] = []
+            for seg in line.split("\r"):
+                buf[: len(seg)] = list(seg)
+            line = "".join(buf)
+        if "\b" in line:
+            out: list[str] = []
+            for ch in line:
+                if ch == "\b":
+                    if out:
+                        out.pop()
+                else:
+                    out.append(ch)
+            line = "".join(out)
+        lines.append(_CTRL.sub("", line).rstrip())
+    return "\n".join(lines).strip("\n")
+
+
 def _run(cmd: list[str], cwd: str | None = None) -> str:
     try:
         out = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=15)

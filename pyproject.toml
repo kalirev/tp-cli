@@ -1,6 +1,6 @@
 [project]
 name = "tp-deskflight"
-version = "0.2.0"
+version = "0.3.0"
 description = "tp - a start/stop/pause flight recorder for your workstation and lab. Tamper-evident proof-of-work capture, routed into Rev Vision."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -5,6 +5,8 @@ Everything lives under $TP_HOME (default ~/.tp):
     config.json              global config (api url, token, redaction)
     current                  id of the active session ("" when idle)
     paused                   present on disk only while paused
+    archive/<id>/            sessions moved out by `tp archive` (path configurable)
+    disposed.jsonl           what `tp dispose` deleted (ids, digests - no content)
     sessions/<id>/
         meta.json            session metadata + timer segments
         events.raw.jsonl     raw command events (written by the shell hook)
@@ -36,7 +38,24 @@ def ensure_home() -> Path:
 
 
 def session_dir(sid: str) -> Path:
-    return home() / "sessions" / sid
+    """Where a session lives: the working set, or the archive if it was moved."""
+    d = home() / "sessions" / sid
+    if not d.exists():
+        a = archive_root() / sid
+        if a.exists():
+            return a
+    return d
+
+
+def archive_root() -> Path:
+    """Default: $TP_HOME/archive. Set elsewhere with `tp config archive_path PATH`."""
+    cfg = read_json(home() / "config.json", default={}) or {}
+    p = cfg.get("archive_path") if isinstance(cfg, dict) else None
+    return Path(os.path.expanduser(p)) if p else home() / "archive"
+
+
+def is_archived(sid: str) -> bool:
+    return not (home() / "sessions" / sid).exists() and (archive_root() / sid).exists()
 
 
 def ensure_session_dir(sid: str) -> Path:

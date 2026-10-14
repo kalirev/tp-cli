@@ -17,9 +17,19 @@ GENESIS = "0" * 64
 # the final digest, so it is covered without bloating each link.
 _SEALED = ("seq", "ts", "type", "cwd", "command", "exit", "duration", "text")
 
+# v0.3 fields. Sealed only when present, so every session sealed by an older
+# tp still verifies byte-for-byte. The output text itself is covered through
+# output_sha256: a push can leave the (possibly sensitive) output behind and
+# the chain still verifies on the server.
+_SEALED_IF_PRESENT = ("origin", "ts_end", "jhash", "output_sha256",
+                      "output_bytes", "output_truncated", "fullscreen")
+
 
 def _canon(ev: dict, prev_hash: str) -> bytes:
     payload = {k: ev.get(k) for k in _SEALED}
+    for k in _SEALED_IF_PRESENT:
+        if k in ev:
+            payload[k] = ev[k]
     payload["prev_hash"] = prev_hash
     return json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
 
@@ -58,6 +68,8 @@ def verify(events: list[dict], artifact_hashes: list[str], expected_digest: str)
             return False, f"event seq={ev.get('seq')} prev_hash mismatch"
         if ev.get("hash") != want:
             return False, f"event seq={ev.get('seq')} hash mismatch (tampered?)"
+        if "output" in ev and content_hash(ev.get("output") or "") != ev.get("output_sha256"):
+            return False, f"event seq={ev.get('seq')} output does not match its sealed hash"
         prev = ev["hash"]
     if digest(events, artifact_hashes) != expected_digest:
         return False, "session digest mismatch"

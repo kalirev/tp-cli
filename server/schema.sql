@@ -44,3 +44,21 @@ create table if not exists tp_artifact (
 create index if not exists tp_session_bucket_idx  on tp_session (bucket);
 create index if not exists tp_session_project_idx on tp_session (project);
 create index if not exists tp_event_type_idx      on tp_event (session_id, type);
+
+-- ---------------------------------------------------------------------------
+-- v0.3: backfill origins, command output, re-seal history.
+-- Safe to run on an existing v0.2 database (idempotent).
+alter table tp_session add column if not exists active_estimated_seconds integer not null default 0;
+alter table tp_session add column if not exists origins         jsonb;   -- {"live":n,"journal":n,"history":n}
+alter table tp_session add column if not exists prior_digests   jsonb;   -- earlier seals of a reopened session
+alter table tp_session add column if not exists output_included boolean not null default false;
+
+alter table tp_event add column if not exists term             text;
+alter table tp_event add column if not exists origin           text;     -- live | journal | history
+alter table tp_event add column if not exists ts_end           timestamptz;
+alter table tp_event add column if not exists jhash            text;     -- journal record hash
+alter table tp_event add column if not exists output           text;     -- null unless pushed --with-output
+alter table tp_event add column if not exists output_sha256    text;     -- always sealed, even when output stays local
+alter table tp_event add column if not exists output_bytes     integer;
+alter table tp_event add column if not exists output_truncated boolean;
+alter table tp_event add column if not exists fullscreen       boolean;

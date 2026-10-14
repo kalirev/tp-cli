@@ -5,6 +5,16 @@ CLI itself.
 
 ## 1. Install the CLI
 
+**Recommended (v0.3): the launcher.** Output capture needs `tp` to be a real
+program your terminals can exec — a fish function or alias isn't enough.
+
+```bash
+sh ~/tp-deskflight/install.sh     # writes ~/.local/bin/tp -> this checkout
+```
+
+No pip, no venv: tp is stdlib-only, so the launcher just runs this folder with
+`python3`. `git pull` in the folder upgrades it. Python packaging also works:
+
 ```bash
 # from the unzipped folder
 pipx install ./tp-deskflight          # recommended (isolated)
@@ -44,8 +54,19 @@ eval "$(tp hook zsh)"
 tp hook fish | source
 ```
 
-The hook is cheap and silent: when no session is active it does almost nothing.
-It only records while a session is `recording` (not `paused`).
+Open a **new** terminal afterwards and run `tp doctor`.
+
+What the hook does (v0.3):
+- At the first prompt it re-launches the shell inside `tp pty`, once, so each
+  command's output can be captured. Set `TP_NO_PTY=1` to skip that in one
+  shell, or `tp config pty off` to never do it. If the PTY can't be set up,
+  you simply get the plain shell.
+- After every command it journals the command, cwd, exit code, timing and
+  output to `~/.tp/journal/` — whether or not a session is running. That's
+  what lets `tp start --from` backfill. `tp off` stops it.
+
+Nothing is written for space-prefixed commands, and `tp ...` commands are
+filtered out.
 
 ### Naming your terminals (optional)
 
@@ -73,7 +94,24 @@ Config is stored at `~/.tp/config.json` (the token is shown as `(set)` in
 tp start "first real session" -p CyberDen
 # ... work ...
 tp stop --to writeups --push
+
+# forgot to start? pull the earlier work in:
+tp start "first real session" -p CyberDen --from 21:40
+tp extend --from 20:30          # mid-session, go back further
 ```
+
+## Upgrading from 0.2
+
+1. `git pull` (or unzip over) `~/tp-deskflight`, then `sh ~/tp-deskflight/install.sh`.
+2. Keep `tp hook fish | source` in `config.fish`; it now prints the v0.3 hook.
+3. Open new terminals (already-open ones keep the old hook, commands only).
+4. If you run Rev Vision ingest: `psql "$DATABASE_URL" -f server/schema.sql`
+   (adds the v0.3 columns; safe on an existing database) and redeploy the route.
+
+Sessions sealed by 0.2 verify unchanged. A stopped 0.2 session that you haven't
+pushed can be backfilled: `tp reopen <id>`, `tp extend --from <time>`,
+`tp stop`. Its earlier hour comes from fish history (the journal didn't exist
+yet), tagged `history`.
 
 ## Where state lives
 
@@ -82,12 +120,19 @@ tp stop --to writeups --push
   config.json
   current                      # active session id ("" when idle)
   paused                       # exists only while paused
+  off, off.d/<pid>             # exist only while capture is off
+  journal/                     # always-on, chained as written (0700)
+    YYYY-MM-DD.jsonl           # one record per command, output included
+    tip.json                   # last record's hash
+  spool/                       # tp pty hands output to the hook here (ms-lived)
   sessions/<id>/
-    meta.json                  # title, project, timer segments, digest
-    events.raw.jsonl           # written by the hook (every terminal)
+    meta.json                  # title, project, segments (live + backfill), digest
     notes.jsonl                # why / note / milestone / open
+    history.jsonl              # fish-history imports for backfill gaps
+    events.raw.jsonl           # 0.2 sessions only (old hook)
     artifacts.jsonl            # git diffs, port snapshots
-    events.jsonl               # sealed, redacted, hash-chained timeline
+    events.jsonl               # sealed, hash-chained timeline
+    events.sealed-N.json       # earlier seals, if the session was reopened
 ```
 
 Override the whole location with `export TP_HOME=/path/to/vault` (useful if you
@@ -96,6 +141,6 @@ want the vault inside a git repo you also back up).
 ## Uninstall
 
 ```bash
-pipx uninstall tp-deskflight     # or pip uninstall tp-deskflight
-# then remove the hook line from your shell rc
+rm ~/.local/bin/tp               # launcher install; or: pipx uninstall tp-deskflight
+# then remove the hook line from your shell rc, and  rm -rf ~/.tp/journal  if you like
 ```

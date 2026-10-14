@@ -10,6 +10,8 @@ Two files wire the recorder into your Next.js + Postgres app:
 1. **Create the tables**
    ```bash
    psql "$DATABASE_URL" -f schema.sql
+   # re-run it after upgrading tp: the v0.3 columns (origin, output, ...) are
+   # added with `alter table ... if not exists`, so it is safe on a live database
    ```
 
 2. **Add the route** — copy `app/api/ingest/session/route.ts` into your app at
