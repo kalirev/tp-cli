@@ -48,16 +48,26 @@ class Terminal(unittest.TestCase):
         r = subprocess.run([str(self.tp_bin), *args], env=self.env, capture_output=True, text=True)
         return r.stdout + r.stderr
 
+    # Queries a real terminal (kitty) answers. fish >= 4.1 sends these at every
+    # prompt and waits for the reply, so a test terminal has to answer them too.
+    REPLIES = {
+        b"\x1b[c": b"\x1b[?62;22c",    # primary device attributes (DA1)
+        b"\x1b[0c": b"\x1b[?62;22c",
+        b"\x1b[6n": b"\x1b[1;1R",      # cursor position report
+    }
+
     def type_into(self, lines, settle=1.5):
-        """Start the shell in a pty, type each line, return everything the screen got."""
+        """Start the shell in a pty like a terminal emulator would, type each
+        line, answer the shell's terminal queries, and return the screen."""
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(self.home / "work")
             os.execvpe(self.shell, self.argv, self.env)
         screen = b""
+        answered = 0          # bytes of `screen` already scanned for queries
 
         def drain(t):
-            nonlocal screen
+            nonlocal screen, answered
             end = time.time() + t
             while time.time() < end:
                 r, _, _ = select.select([fd], [], [], 0.05)
@@ -69,6 +79,19 @@ class Terminal(unittest.TestCase):
                     if not d:
                         return
                     screen += d
+                    # answer every query that has fully arrived since last time
+                    pending = screen[max(answered - 8, 0):]
+                    hits = []
+                    for q, reply in self.REPLIES.items():
+                        i = pending.find(q)
+                        while i != -1:
+                            pos = max(answered - 8, 0) + i
+                            if pos >= answered - len(q) + 1 and pos + len(q) > answered:
+                                hits.append((pos, reply))
+                            i = pending.find(q, i + 1)
+                    for _, reply in sorted(hits):
+                        os.write(fd, reply)
+                    answered = len(screen)
 
         drain(3)
         for line in lines:
@@ -76,11 +99,25 @@ class Terminal(unittest.TestCase):
             drain(settle)
         os.write(fd, b"exit\r")
         drain(1.5)
-        try:
+        # never hang the suite: give the shell 10 s to exit, then kill it and fail
+        deadline = time.time() + 10
+        done = False
+        while time.time() < deadline:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0]:
+                    done = True
+                    break
+            except ChildProcessError:
+                done = True
+                break
+            drain(0.2)
+        if not done:
+            os.kill(pid, 9)
             os.waitpid(pid, 0)
-        except ChildProcessError:
-            pass
         os.close(fd)
+        if not done:
+            self.fail(f"{self.shell} didn't exit after `exit`; last screen output:\n"
+                      f"{screen[-600:]!r}")
         return screen
 
     def journal(self):
